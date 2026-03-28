@@ -28,9 +28,11 @@ service cloud.firestore {
     function isValidLeaveRequest(data) {
       return data.keys().hasAll(['uid', 'leaveType', 'startDate', 'endDate', 'days', 'status']) &&
              data.uid is string &&
-             data.leaveType in ['CL', 'PL', 'SL', 'ML', 'PaL', 'CompOff', 'LWP'] &&
+             data.leaveType in ['CL', 'PL', 'SL', 'ML', 'PaL', 'CompOff', 'WPL', 'Absent'] &&
              data.status in ['pending', 'approved', 'rejected'] &&
-             data.days is number && data.days > 0;
+             data.days is number && data.days > 0 &&
+             (!('isHalfDay' in data) || data.isHalfDay is bool) &&
+             (!('isIndiscipline' in data) || data.isIndiscipline is bool);
     }
 
     // ===============================================================
@@ -40,7 +42,9 @@ service cloud.firestore {
     match /users/{userId} {
       allow read: if isOwner(userId) || isAdmin();
       allow create: if isAuthenticated() && isOwner(userId) && isValidUser(request.resource.data);
-      allow update: if isAdmin() || (isOwner(userId) && request.resource.data.role == resource.data.role);
+      allow update: if isAdmin() || (isOwner(userId) && 
+                      request.resource.data.role == resource.data.role && 
+                      request.resource.data.balances == resource.data.balances);
       allow delete: if isAdmin();
     }
 
@@ -55,6 +59,12 @@ service cloud.firestore {
       allow read: if isAuthenticated() && (resource.data.uid == request.auth.uid || isAdmin());
       allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
       allow update: if isAdmin();
+    }
+
+    match /compOffRecords/{recordId} {
+      allow read: if isAuthenticated() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow create: if isAdmin();
+      allow update, delete: if false;
     }
   }
 }

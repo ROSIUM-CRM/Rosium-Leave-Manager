@@ -1,7 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { 
   onAuthStateChanged, 
-  User as FirebaseUser 
+  User as FirebaseUser,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  updatePassword
 } from 'firebase/auth';
 import { 
   doc, 
@@ -16,7 +19,8 @@ import {
   deleteDoc,
   Timestamp,
   orderBy,
-  getDocFromServer
+  getDocFromServer,
+  serverTimestamp
 } from 'firebase/firestore';
 import { 
   LogOut, 
@@ -31,19 +35,18 @@ import {
   AlertCircle,
   ChevronRight,
   Edit,
-  Trash2
+  Trash2,
+  Settings,
+  Key,
+  RefreshCw
 } from 'lucide-react';
 import { format, differenceInDays, addDays, isBefore, startOfDay } from 'date-fns';
 import { auth, db, loginWithEmail, registerUser, logout } from './firebase';
-import { 
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword
-} from 'firebase/auth';
 import { cn } from './lib/utils';
 
 // --- Types ---
 
-type LeaveType = 'CL' | 'PL' | 'SL' | 'ML' | 'PaL' | 'CompOff' | 'LWP';
+type LeaveType = 'CL' | 'PL' | 'SL' | 'ML' | 'PaL' | 'CompOff' | 'WPL' | 'Absent';
 
 interface LeaveBalances {
   CL: number;
@@ -61,6 +64,7 @@ interface UserProfile {
   photoURL: string;
   role: 'employee' | 'hr';
   designation?: string;
+  salary?: number;
   dob?: string;
   doj?: string;
   balances: LeaveBalances;
@@ -88,6 +92,14 @@ interface LeaveRequest {
   status: 'pending' | 'approved' | 'rejected';
   hrComment?: string;
   createdAt: any;
+  isIndiscipline?: boolean;
+  isHalfDay?: boolean;
+  changeRequest?: {
+    requestedType: LeaveType;
+    reason: string;
+    status: 'pending' | 'approved' | 'rejected';
+    hrComment?: string;
+  };
 }
 
 const LEAVE_TYPES: { label: string; value: LeaveType; color: string }[] = [
@@ -97,7 +109,8 @@ const LEAVE_TYPES: { label: string; value: LeaveType; color: string }[] = [
   { label: 'Maternity Leave (ML)', value: 'ML', color: 'bg-purple-100 text-purple-700' },
   { label: 'Paternity Leave (PaL)', value: 'PaL', color: 'bg-indigo-100 text-indigo-700' },
   { label: 'Compensatory Off', value: 'CompOff', color: 'bg-orange-100 text-orange-700' },
-  { label: 'Leave Without Pay', value: 'LWP', color: 'bg-gray-100 text-gray-700' },
+  { label: 'Without Pay Leave (WPL)', value: 'WPL', color: 'bg-gray-100 text-gray-700' },
+  { label: 'Absent (Indiscipline)', value: 'Absent', color: 'bg-red-600 text-white' },
 ];
 
 const INITIAL_BALANCES: LeaveBalances = {
@@ -111,21 +124,43 @@ const INITIAL_BALANCES: LeaveBalances = {
 
 // --- Utilities ---
 
-function calculateAccruedPL(doj: string, currentPL: number): number {
-  if (!doj) return currentPL;
-  const joinDate = new Date(doj);
+function calculateAccruedPL(doj: string, lastUpdate?: string): { additionalPL: number; nextUpdate: string } {
+  if (!doj) return { additionalPL: 0, nextUpdate: '' };
+  
   const now = new Date();
+  const currentMonthKey = `${now.getMonth()}-${now.getFullYear()}`;
   
-  // Calculate months since joining
-  const monthsDiff = (now.getFullYear() - joinDate.getFullYear()) * 12 + (now.getMonth() - joinDate.getMonth());
-  
-  if (monthsDiff <= 0) return currentPL;
+  if (lastUpdate === currentMonthKey) {
+    return { additionalPL: 0, nextUpdate: currentMonthKey };
+  }
 
-  // Accrual: 1.5 days per month
-  // We should ideally track the last accrual date to avoid over-calculating
-  // For this demo, we'll assume the balance stored is the current one and we just show the logic
-  // A real system would run a cron job or update on login
-  return Math.min(45, currentPL); // Max 45 days cumulative
+  const joinDate = new Date(doj);
+  const currentYear = now.getFullYear();
+  
+  // Start date for this year's accrual
+  let startDate: Date;
+  if (lastUpdate) {
+    const [lastMonth, lastYear] = lastUpdate.split('-').map(Number);
+    // Start from the month after the last update
+    startDate = new Date(lastYear, lastMonth + 1, 1);
+  } else {
+    // If no last update, start from Jan 1st of current year or DOJ
+    startDate = new Date(currentYear, 0, 1);
+    if (joinDate > startDate) {
+      startDate = joinDate;
+    }
+  }
+
+  // Calculate months between startDate and now
+  // If startDate is Jan 1st and now is March 28th, monthsDiff = 2 (Jan, Feb)
+  let monthsDiff = (now.getFullYear() - startDate.getFullYear()) * 12 + (now.getMonth() - startDate.getMonth());
+  
+  if (monthsDiff < 0) monthsDiff = 0;
+
+  return { 
+    additionalPL: monthsDiff * 1.5, 
+    nextUpdate: currentMonthKey 
+  };
 }
 
 // --- Components ---
@@ -140,6 +175,15 @@ export default function App() {
   const [showApplyModal, setShowApplyModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showEncashModal, setShowEncashModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showAddCompOffModal, setShowAddCompOffModal] = useState(false);
+  const [showMarkAbsentModal, setShowMarkAbsentModal] = useState(false);
+  const [selectedUserForCompOff, setSelectedUserForCompOff] = useState<UserProfile | null>(null);
+  const [selectedUserForAbsent, setSelectedUserForAbsent] = useState<UserProfile | null>(null);
+  const [showChangeRequestModal, setShowChangeRequestModal] = useState(false);
+  const [selectedRequestForChange, setSelectedRequestForChange] = useState<LeaveRequest | null>(null);
+  const [showChangeAbsentModal, setShowChangeAbsentModal] = useState(false);
+  const [selectedAbsentRequest, setSelectedAbsentRequest] = useState<LeaveRequest | null>(null);
   const [viewMode, setViewMode] = useState<'dashboard' | 'calendar' | 'users'>('dashboard');
 
   // Auth & Profile Setup
@@ -162,6 +206,21 @@ export default function App() {
             await updateDoc(userRef, { role: 'hr' });
             data.role = 'hr';
           }
+
+          // Sync PL Accrual
+          if (data.doj) {
+            const { additionalPL, nextUpdate } = calculateAccruedPL(data.doj, data.lastAccrualUpdate);
+            if (additionalPL > 0 || data.lastAccrualUpdate !== nextUpdate) {
+              const newPL = (data.balances.PL || 0) + additionalPL;
+              await updateDoc(userRef, {
+                'balances.PL': newPL,
+                'lastAccrualUpdate': nextUpdate
+              });
+              data.balances.PL = newPL;
+              data.lastAccrualUpdate = nextUpdate;
+            }
+          }
+
           setProfile(data);
           // Check if profile is incomplete
           if (!data.designation || !data.dob || !data.doj) {
@@ -170,13 +229,17 @@ export default function App() {
         } else {
           // Create new profile
           const isHR = firebaseUser.email === 'info.rosium@gmail.com';
+          const now = new Date();
+          const currentMonthKey = `${now.getMonth()}-${now.getFullYear()}`;
+          
           const newProfile: UserProfile = {
             uid: firebaseUser.uid,
             email: firebaseUser.email || '',
             displayName: firebaseUser.displayName || (isHR ? 'HR Admin' : 'New Employee'),
             photoURL: firebaseUser.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(firebaseUser.email || 'User')}&background=random`,
             role: isHR ? 'hr' : 'employee',
-            balances: INITIAL_BALANCES,
+            balances: { ...INITIAL_BALANCES },
+            lastAccrualUpdate: currentMonthKey
           };
           await setDoc(userRef, newProfile);
           setProfile(newProfile);
@@ -288,12 +351,19 @@ export default function App() {
             </div>
           )}
           <div className="flex items-center gap-3 px-3 py-1.5 bg-gray-100 rounded-full">
-            <img src={user.photoURL || ''} className="w-8 h-8 rounded-full border border-white" alt="User" />
+            <img src={user.photoURL || null} className="w-8 h-8 rounded-full border border-white" alt="User" />
             <div className="hidden sm:block">
               <p className="text-sm font-bold text-gray-800 leading-none">{profile?.displayName}</p>
               <p className="text-[10px] text-gray-500 uppercase font-bold mt-1">{profile?.role}</p>
             </div>
           </div>
+          <button 
+            onClick={() => setShowSettingsModal(true)}
+            className="p-2 text-gray-400 hover:text-blue-600 transition-colors"
+            title="Settings"
+          >
+            <Settings className="w-5 h-5" />
+          </button>
           <button 
             onClick={logout}
             className="p-2 text-gray-400 hover:text-red-600 transition-colors"
@@ -311,6 +381,10 @@ export default function App() {
             requests={requests} 
             onApply={() => setShowApplyModal(true)} 
             onEncash={() => setShowEncashModal(true)}
+            onApplyChangeRequest={(req) => {
+              setSelectedRequestForChange(req);
+              setShowChangeRequestModal(true);
+            }}
           />
         ) : (
           viewMode === 'dashboard' ? (
@@ -318,6 +392,10 @@ export default function App() {
               profile={profile} 
               allRequests={allRequests} 
               encashmentRequests={encashmentRequests}
+              onChangeAbsent={(req) => {
+                setSelectedAbsentRequest(req);
+                setShowChangeAbsentModal(true);
+              }}
             />
           ) : viewMode === 'calendar' ? (
             <div className="lg:col-span-12">
@@ -325,7 +403,12 @@ export default function App() {
             </div>
           ) : (
             <div className="lg:col-span-12">
-              <UserManagement />
+              <UserManagement 
+                setSelectedUserForCompOff={setSelectedUserForCompOff}
+                setShowAddCompOffModal={setShowAddCompOffModal}
+                setSelectedUserForAbsent={setSelectedUserForAbsent}
+                setShowMarkAbsentModal={setShowMarkAbsentModal}
+              />
             </div>
           )
         )}
@@ -354,6 +437,351 @@ export default function App() {
           }} 
         />
       )}
+
+      {showSettingsModal && (
+        <SettingsModal 
+          onClose={() => setShowSettingsModal(false)} 
+        />
+      )}
+
+      {showAddCompOffModal && selectedUserForCompOff && profile && (
+        <AddCompOffModal 
+          targetUser={selectedUserForCompOff}
+          hrUser={profile}
+          onClose={() => {
+            setShowAddCompOffModal(false);
+            setSelectedUserForCompOff(null);
+          }} 
+        />
+      )}
+
+      {showMarkAbsentModal && selectedUserForAbsent && profile && (
+        <MarkAbsentModal 
+          targetUser={selectedUserForAbsent}
+          hrUser={profile}
+          onClose={() => {
+            setShowMarkAbsentModal(false);
+            setSelectedUserForAbsent(null);
+          }} 
+        />
+      )}
+
+      {showChangeRequestModal && selectedRequestForChange && (
+        <ChangeRequestModal 
+          request={selectedRequestForChange}
+          onClose={() => {
+            setShowChangeRequestModal(false);
+            setSelectedRequestForChange(null);
+          }}
+        />
+      )}
+
+      {showChangeAbsentModal && selectedAbsentRequest && (
+        <ChangeAbsentModal 
+          request={selectedAbsentRequest}
+          onClose={() => {
+            setShowChangeAbsentModal(false);
+            setSelectedAbsentRequest(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function SettingsModal({ onClose }: { onClose: () => void }) {
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  const handleUpdatePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newPassword !== confirmPassword) {
+      setError("Passwords do not match");
+      return;
+    }
+    setLoading(true);
+    setError('');
+    setSuccess('');
+    try {
+      if (auth.currentUser) {
+        await updatePassword(auth.currentUser, newPassword);
+        setSuccess("Password updated successfully!");
+        setNewPassword('');
+        setConfirmPassword('');
+      }
+    } catch (err: any) {
+      console.error("Error updating password:", err);
+      if (err.code === 'auth/requires-recent-login') {
+        setError("Please logout and login again to change your password for security reasons.");
+      } else {
+        setError(err.message);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6 z-50">
+      <div className="bg-white rounded-[32px] w-full max-w-md overflow-hidden shadow-2xl animate-in fade-in zoom-in duration-200">
+        <div className="bg-gray-900 p-8 text-white flex items-center justify-between">
+          <div>
+            <h3 className="text-2xl font-bold">Account Settings</h3>
+            <p className="text-gray-400 text-sm mt-1">Change your password</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-xl transition-colors">
+            <XCircle className="w-6 h-6" />
+          </button>
+        </div>
+        
+        <form onSubmit={handleUpdatePassword} className="p-8 space-y-6">
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">New Password</label>
+              <div className="relative">
+                <Key className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <input 
+                  type="password" 
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl pl-12 pr-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+                  placeholder="••••••••"
+                  required
+                  minLength={6}
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Confirm Password</label>
+              <div className="relative">
+                <Key className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <input 
+                  type="password" 
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl pl-12 pr-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+                  placeholder="••••••••"
+                  required
+                  minLength={6}
+                />
+              </div>
+            </div>
+          </div>
+
+          {error && (
+            <div className="p-4 bg-red-50 text-red-600 rounded-xl text-sm font-bold flex items-center gap-3">
+              <AlertCircle className="w-5 h-5" />
+              {error}
+            </div>
+          )}
+
+          {success && (
+            <div className="p-4 bg-green-50 text-green-600 rounded-xl text-sm font-bold flex items-center gap-3">
+              <CheckCircle className="w-5 h-5" />
+              {success}
+            </div>
+          )}
+
+          <button 
+            type="submit"
+            disabled={loading}
+            className="w-full bg-blue-600 text-white py-4 px-6 rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-xl shadow-blue-600/20 flex items-center justify-center gap-2"
+          >
+            {loading ? 'Updating...' : 'Update Password'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function AddCompOffModal({ targetUser, hrUser, onClose }: { targetUser: UserProfile; hrUser: UserProfile; onClose: () => void }) {
+  const [workedDate, setWorkedDate] = useState('');
+  const [reason, setReason] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleAddCompOff = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      // 1. Create a record
+      await addDoc(collection(db, 'compOffRecords'), {
+        uid: targetUser.uid,
+        employeeName: targetUser.displayName,
+        workedDate,
+        reason,
+        addedBy: hrUser.uid,
+        createdAt: new Date().toISOString()
+      });
+
+      // 2. Update user balance
+      const userRef = doc(db, 'users', targetUser.uid);
+      const currentCompOff = targetUser.balances.CompOff || 0;
+      
+      await updateDoc(userRef, {
+        'balances.CompOff': currentCompOff + 1
+      });
+
+      onClose();
+    } catch (err: any) {
+      console.error("Error adding CompOff:", err);
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6 z-50">
+      <div className="bg-white rounded-[32px] w-full max-w-md overflow-hidden shadow-2xl animate-in fade-in zoom-in duration-200">
+        <div className="bg-orange-600 p-8 text-white flex items-center justify-between">
+          <div>
+            <h3 className="text-2xl font-bold">Add CompOff</h3>
+            <p className="text-orange-100 text-sm mt-1">For {targetUser.displayName}</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-xl transition-colors">
+            <XCircle className="w-6 h-6" />
+          </button>
+        </div>
+        
+        <form onSubmit={handleAddCompOff} className="p-8 space-y-6">
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Worked Date (Weekly Off)</label>
+              <input 
+                type="date" 
+                value={workedDate}
+                onChange={(e) => setWorkedDate(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-orange-500 outline-none"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Reason / Remarks</label>
+              <textarea 
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-orange-500 outline-none min-h-[100px]"
+                placeholder="Worked on Sunday for project deadline"
+                required
+              />
+            </div>
+          </div>
+
+          {error && (
+            <div className="p-4 bg-red-50 text-red-600 rounded-xl text-sm font-bold flex items-center gap-3">
+              <AlertCircle className="w-5 h-5" />
+              {error}
+            </div>
+          )}
+
+          <button 
+            type="submit"
+            disabled={loading}
+            className="w-full bg-orange-600 text-white py-4 px-6 rounded-2xl font-bold hover:bg-orange-700 transition-all shadow-xl shadow-orange-600/20 flex items-center justify-center gap-2"
+          >
+            {loading ? 'Adding...' : 'Add 1 Day Balance'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function MarkAbsentModal({ targetUser, hrUser, onClose }: { targetUser: UserProfile; hrUser: UserProfile; onClose: () => void }) {
+  const [absentDate, setAbsentDate] = useState(format(new Date(), 'yyyy-MM-dd'));
+  const [reason, setReason] = useState('Uninformed absence');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleMarkAbsent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      // 1. Create a leave request with 'Absent' type and 'approved' status
+      await addDoc(collection(db, 'leaveRequests'), {
+        uid: targetUser.uid,
+        employeeName: targetUser.displayName,
+        leaveType: 'Absent',
+        startDate: absentDate,
+        endDate: absentDate,
+        days: 1,
+        reason: reason,
+        status: 'approved',
+        hrComment: `Marked absent by HR (${hrUser.displayName})`,
+        isIndiscipline: true,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+
+      onClose();
+    } catch (err: any) {
+      console.error("Error marking absent:", err);
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6 z-50">
+      <div className="bg-white rounded-[32px] w-full max-w-md overflow-hidden shadow-2xl animate-in fade-in zoom-in duration-200">
+        <div className="bg-red-600 p-8 text-white flex items-center justify-between">
+          <div>
+            <h3 className="text-2xl font-bold">Mark Absent</h3>
+            <p className="text-red-100 text-sm mt-1">For {targetUser.displayName}</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-xl transition-colors">
+            <XCircle className="w-6 h-6" />
+          </button>
+        </div>
+        
+        <form onSubmit={handleMarkAbsent} className="p-8 space-y-6">
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Date of Absence</label>
+              <input 
+                type="date" 
+                value={absentDate}
+                onChange={(e) => setAbsentDate(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-red-500 outline-none"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Reason / Remarks</label>
+              <textarea 
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-red-500 outline-none min-h-[100px]"
+                placeholder="Uninformed absence"
+                required
+              />
+            </div>
+          </div>
+
+          {error && (
+            <div className="p-4 bg-red-50 text-red-600 rounded-xl text-sm font-bold flex items-center gap-3">
+              <AlertCircle className="w-5 h-5" />
+              {error}
+            </div>
+          )}
+
+          <button 
+            type="submit"
+            disabled={loading}
+            className="w-full bg-red-600 text-white py-4 px-6 rounded-2xl font-bold hover:bg-red-700 transition-all shadow-xl shadow-red-600/20 flex items-center justify-center gap-2"
+          >
+            {loading ? 'Marking...' : 'Mark as Absent'}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }
@@ -481,7 +909,7 @@ function LoginScreen() {
   );
 }
 
-function EmployeeDashboard({ profile, requests, onApply, onEncash }: { profile: UserProfile; requests: LeaveRequest[]; onApply: () => void; onEncash: () => void }) {
+function EmployeeDashboard({ profile, requests, onApply, onEncash, onApplyChangeRequest }: { profile: UserProfile; requests: LeaveRequest[]; onApply: () => void; onEncash: () => void; onApplyChangeRequest: (req: LeaveRequest) => void }) {
   const isJanuary = new Date().getMonth() === 0;
   
   return (
@@ -578,10 +1006,13 @@ function EmployeeDashboard({ profile, requests, onApply, onEncash }: { profile: 
                 <div key={req.id} className="group p-5 bg-white border border-gray-100 rounded-2xl hover:border-orange-200 hover:shadow-md transition-all">
                   <div className="flex items-start justify-between">
                     <div className="flex gap-4">
-                      <div className={cn("px-3 py-1 rounded-full text-[10px] font-bold uppercase h-fit", 
+                      <div className={cn("px-3 py-1 rounded-full text-[10px] font-bold uppercase h-fit flex items-center gap-1", 
                         LEAVE_TYPES.find(t => t.value === req.leaveType)?.color
                       )}>
                         {req.leaveType}
+                        {req.isIndiscipline && (
+                          <span className="bg-white/20 px-1 rounded text-[8px]">Indiscipline</span>
+                        )}
                       </div>
                       <div>
                         <h4 className="font-bold text-gray-900">
@@ -596,6 +1027,21 @@ function EmployeeDashboard({ profile, requests, onApply, onEncash }: { profile: 
                             Applied {format(req.createdAt?.toDate() || new Date(), 'MMM dd')}
                           </span>
                         </div>
+                        {req.leaveType === 'Absent' && !req.changeRequest && (
+                          <button 
+                            onClick={() => onApplyChangeRequest(req)}
+                            className="mt-3 text-[10px] font-bold text-orange-600 uppercase tracking-widest hover:underline flex items-center gap-1"
+                          >
+                            <RefreshCw className="w-3 h-3" /> Request to Change Status
+                          </button>
+                        )}
+                        {req.changeRequest && (
+                          <div className="mt-3 p-3 bg-orange-50 rounded-xl border border-orange-100">
+                            <p className="text-[10px] font-bold text-orange-600 uppercase tracking-widest mb-1">Change Request: {req.changeRequest.status}</p>
+                            <p className="text-xs text-gray-600">Requested: {req.changeRequest.requestedType}</p>
+                            <p className="text-xs text-gray-500 italic mt-1">"{req.changeRequest.reason}"</p>
+                          </div>
+                        )}
                       </div>
                     </div>
                     <div className="flex flex-col items-end gap-2">
@@ -615,10 +1061,23 @@ function EmployeeDashboard({ profile, requests, onApply, onEncash }: { profile: 
   );
 }
 
-function HRDashboard({ profile, allRequests, encashmentRequests }: { profile: UserProfile; allRequests: LeaveRequest[]; encashmentRequests: EncashmentRequest[] }) {
+function HRDashboard({ profile, allRequests, encashmentRequests, onChangeAbsent }: { profile: UserProfile; allRequests: LeaveRequest[]; encashmentRequests: EncashmentRequest[]; onChangeAbsent: (req: LeaveRequest) => void }) {
+  const [activeTab, setActiveTab] = useState<'leaves' | 'salary'>('leaves');
+  const [users, setUsers] = useState<UserProfile[]>([]);
+  const [showPastLeaveModal, setShowPastLeaveModal] = useState(false);
+
+  useEffect(() => {
+    const q = query(collection(db, 'users'), orderBy('displayName', 'asc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setUsers(snapshot.docs.map(doc => doc.data() as UserProfile));
+    });
+    return () => unsubscribe();
+  }, []);
+
   const pending = allRequests.filter(r => r.status === 'pending');
   const history = allRequests.filter(r => r.status !== 'pending');
   const pendingEncash = encashmentRequests.filter(r => r.status === 'pending');
+  const changeRequests = allRequests.filter(r => r.changeRequest && r.changeRequest.status === 'pending');
 
   const handleAction = async (requestId: string, status: 'approved' | 'rejected') => {
     const comment = prompt(`Add a comment for this ${status} (optional):`);
@@ -632,8 +1091,8 @@ function HRDashboard({ profile, allRequests, encashmentRequests }: { profile: Us
         updatedAt: Timestamp.now()
       });
 
-      // If approved, deduct from balance
-      if (status === 'approved' && req.leaveType !== 'LWP') {
+      // If approved, deduct from balance (skip for WPL and Absent)
+      if (status === 'approved' && req.leaveType !== 'WPL' && req.leaveType !== 'Absent') {
         const userRef = doc(db, 'users', req.uid);
         const userSnap = await getDoc(userRef);
         if (userSnap.exists()) {
@@ -672,27 +1131,86 @@ function HRDashboard({ profile, allRequests, encashmentRequests }: { profile: Us
 
   return (
     <div className="lg:col-span-12 space-y-8">
-      {/* Stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-6">
-        <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-sm">
-          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Pending Leaves</p>
-          <p className="text-4xl font-bold text-orange-600">{pending.length}</p>
-        </div>
-        <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-sm">
-          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Pending Encash</p>
-          <p className="text-4xl font-bold text-blue-600">{pendingEncash.length}</p>
-        </div>
-        <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-sm">
-          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Total Processed</p>
-          <p className="text-4xl font-bold text-gray-900">{history.length}</p>
-        </div>
-        <div className="bg-gray-900 p-6 rounded-3xl text-white shadow-xl shadow-gray-900/20">
-          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">HR Status</p>
-          <p className="text-xl font-bold flex items-center gap-2">
-            <ShieldCheck className="text-orange-400" /> Active
-          </p>
-        </div>
+      {/* Tabs */}
+      <div className="flex items-center gap-2 bg-white p-2 rounded-2xl border border-gray-200 w-fit">
+        <button 
+          onClick={() => setActiveTab('leaves')}
+          className={cn("px-6 py-2 rounded-xl font-bold text-sm transition-all", 
+            activeTab === 'leaves' ? "bg-gray-900 text-white shadow-lg shadow-gray-900/20" : "text-gray-500 hover:bg-gray-50"
+          )}
+        >
+          Leave Management
+        </button>
+        <button 
+          onClick={() => setActiveTab('salary')}
+          className={cn("px-6 py-2 rounded-xl font-bold text-sm transition-all", 
+            activeTab === 'salary' ? "bg-gray-900 text-white shadow-lg shadow-gray-900/20" : "text-gray-500 hover:bg-gray-50"
+          )}
+        >
+          Salary Calculation
+        </button>
       </div>
+
+      {activeTab === 'salary' ? (
+        <SalaryCalculator users={users} allRequests={allRequests} />
+      ) : (
+        <>
+          {/* Stats */}
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-6">
+            <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-sm">
+              <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Pending Leaves</p>
+              <p className="text-4xl font-bold text-orange-600">{pending.length}</p>
+            </div>
+            <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-sm">
+              <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Pending Encash</p>
+              <p className="text-4xl font-bold text-blue-600">{pendingEncash.length}</p>
+            </div>
+            <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-sm">
+              <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Total Processed</p>
+              <p className="text-4xl font-bold text-gray-900">{history.length}</p>
+            </div>
+            <button 
+              onClick={() => setShowPastLeaveModal(true)}
+              className="bg-purple-600 p-6 rounded-3xl text-white shadow-xl shadow-purple-600/20 hover:bg-purple-700 transition-all text-left group"
+            >
+              <p className="text-xs font-bold text-purple-200 uppercase tracking-widest mb-1">Implementation Support</p>
+              <p className="text-xl font-bold flex items-center gap-2 group-hover:translate-x-1 transition-transform">
+                <Plus className="w-5 h-5" /> Add Past Record
+              </p>
+            </button>
+          </div>
+
+          {/* Change Requests */}
+      {changeRequests.length > 0 && (
+        <div className="bg-orange-50 rounded-3xl p-8 border border-orange-100 shadow-sm">
+          <h3 className="text-2xl font-bold text-orange-900 mb-8 flex items-center gap-3">
+            Absent Change Requests
+            <span className="bg-orange-200 text-orange-700 text-xs px-2 py-1 rounded-full">{changeRequests.length}</span>
+          </h3>
+          <div className="space-y-4">
+            {changeRequests.map(req => (
+              <div key={req.id} className="bg-white p-6 rounded-2xl flex items-center justify-between shadow-sm border border-orange-100">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <p className="font-bold text-gray-900">{req.employeeName}</p>
+                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">on {format(new Date(req.startDate), 'MMM dd')}</span>
+                  </div>
+                  <p className="text-sm text-gray-600">Requested: <span className="font-bold text-orange-600">{req.changeRequest?.requestedType}</span></p>
+                  <p className="text-sm text-gray-500 italic mt-2">"{req.changeRequest?.reason}"</p>
+                </div>
+                <div className="flex gap-2 ml-4">
+                  <button 
+                    onClick={() => onChangeAbsent(req)} 
+                    className="bg-orange-600 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-orange-700 transition-all flex items-center gap-2"
+                  >
+                    <RefreshCw className="w-4 h-4" /> Review & Change
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Encashment Requests */}
       {pendingEncash.length > 0 && (
@@ -769,6 +1287,15 @@ function HRDashboard({ profile, allRequests, encashmentRequests }: { profile: Us
                     </td>
                     <td className="py-5 text-right">
                       <div className="flex items-center justify-end gap-2">
+                        {req.leaveType === 'Absent' && (
+                          <button 
+                            onClick={() => onChangeAbsent(req)}
+                            className="p-2 text-orange-600 hover:bg-orange-50 rounded-xl transition-colors"
+                            title="Revoke/Change Absent Status"
+                          >
+                            <RefreshCw className="w-6 h-6" />
+                          </button>
+                        )}
                         <button 
                           onClick={() => handleAction(req.id, 'approved')}
                           className="p-2 text-green-600 hover:bg-green-50 rounded-xl transition-colors"
@@ -804,10 +1331,214 @@ function HRDashboard({ profile, allRequests, encashmentRequests }: { profile: Us
                 <div className="font-bold text-gray-900">{req.employeeName}</div>
                 <div className="text-sm text-gray-500">{req.leaveType} for {req.days} days</div>
               </div>
-              <StatusBadge status={req.status} />
+              <div className="flex items-center gap-4">
+                {req.leaveType === 'Absent' && (
+                  <button 
+                    onClick={() => onChangeAbsent(req)}
+                    className="p-2 text-orange-600 hover:bg-orange-50 rounded-xl transition-colors"
+                    title="Revoke/Change Absent Status"
+                  >
+                    <RefreshCw className="w-5 h-5" />
+                  </button>
+                )}
+                <StatusBadge status={req.status} />
+              </div>
             </div>
           ))}
         </div>
+      </div>
+
+      {showPastLeaveModal && (
+        <AddPastLeaveModal users={users} onClose={() => setShowPastLeaveModal(false)} />
+      )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ChangeRequestModal({ request, onClose }: { request: LeaveRequest; onClose: () => void }) {
+  const [requestedType, setRequestedType] = useState<LeaveType>('CL');
+  const [reason, setReason] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      await updateDoc(doc(db, 'leaveRequests', request.id), {
+        changeRequest: {
+          requestedType,
+          reason,
+          status: 'pending'
+        },
+        updatedAt: serverTimestamp()
+      });
+      onClose();
+    } catch (err) {
+      console.error("Error submitting change request:", err);
+      alert("Failed to submit request.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6 z-50">
+      <div className="bg-white rounded-[32px] w-full max-w-md overflow-hidden shadow-2xl animate-in fade-in zoom-in duration-200">
+        <div className="bg-orange-600 p-8 text-white">
+          <h3 className="text-2xl font-bold">Request Change</h3>
+          <p className="text-orange-100 text-sm mt-1">For date: {format(new Date(request.startDate), 'MMM dd, yyyy')}</p>
+        </div>
+        
+        <form onSubmit={handleSubmit} className="p-8 space-y-6">
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Requested Leave Type</label>
+              <select 
+                value={requestedType}
+                onChange={(e) => setRequestedType(e.target.value as LeaveType)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-orange-500 outline-none"
+              >
+                {LEAVE_TYPES.filter(t => t.value !== 'Absent' && t.value !== 'WPL').map(t => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Genuine Reason</label>
+              <textarea 
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-orange-500 outline-none min-h-[100px]"
+                placeholder="Explain why you were absent and why it should be changed..."
+                required
+              />
+            </div>
+          </div>
+
+          <button 
+            type="submit"
+            disabled={loading}
+            className="w-full bg-orange-600 text-white py-4 px-6 rounded-2xl font-bold hover:bg-orange-700 transition-all shadow-xl shadow-orange-600/20"
+          >
+            {loading ? 'Submitting...' : 'Submit Change Request'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function ChangeAbsentModal({ request, onClose }: { request: LeaveRequest; onClose: () => void }) {
+  const [newType, setNewType] = useState<LeaveType>(request.changeRequest?.requestedType || 'CL');
+  const [hrComment, setHrComment] = useState(request.changeRequest?.reason ? `Approved change request: ${request.changeRequest.reason}` : '');
+  const [loading, setLoading] = useState(false);
+
+  const handleUpdate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const userRef = doc(db, 'users', request.uid);
+      const userSnap = await getDoc(userRef);
+      if (!userSnap.exists()) throw new Error("User not found");
+      const userData = userSnap.data() as UserProfile;
+      const currentBalance = userData.balances[newType as keyof LeaveBalances] || 0;
+
+      if (newType !== 'WPL' && currentBalance < request.days) {
+        alert(`Insufficient ${newType} balance for this employee.`);
+        setLoading(false);
+        return;
+      }
+
+      // 1. Update request
+      await updateDoc(doc(db, 'leaveRequests', request.id), {
+        leaveType: newType,
+        isIndiscipline: false,
+        hrComment: hrComment || `Changed from Absent to ${newType} by HR`,
+        status: 'approved',
+        changeRequest: request.changeRequest ? {
+          ...request.changeRequest,
+          status: 'approved',
+          hrComment: hrComment
+        } : null,
+        updatedAt: serverTimestamp()
+      });
+
+      // 2. Deduct from new balance if not WPL
+      if (newType !== 'WPL') {
+        await updateDoc(userRef, {
+          [`balances.${newType}`]: Math.max(0, currentBalance - request.days)
+        });
+      }
+
+      onClose();
+    } catch (err) {
+      console.error("Error updating absent status:", err);
+      alert("Failed to update status.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6 z-50">
+      <div className="bg-white rounded-[32px] w-full max-w-md overflow-hidden shadow-2xl animate-in fade-in zoom-in duration-200">
+        <div className="bg-blue-600 p-8 text-white">
+          <h3 className="text-2xl font-bold">Revoke Absent Status</h3>
+          <p className="text-blue-100 text-sm mt-1">For {request.employeeName} on {format(new Date(request.startDate), 'MMM dd')}</p>
+        </div>
+        
+        <form onSubmit={handleUpdate} className="p-8 space-y-6">
+          <div className="space-y-4">
+            {request.changeRequest && (
+              <div className="p-4 bg-orange-50 rounded-2xl border border-orange-100">
+                <p className="text-[10px] font-bold text-orange-600 uppercase tracking-widest mb-1">Employee Request</p>
+                <p className="text-sm text-gray-700 font-bold">Requested: {request.changeRequest.requestedType}</p>
+                <p className="text-xs text-gray-500 italic mt-1">"{request.changeRequest.reason}"</p>
+              </div>
+            )}
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">New Leave Type</label>
+              <select 
+                value={newType}
+                onChange={(e) => setNewType(e.target.value as LeaveType)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+              >
+                {LEAVE_TYPES.filter(t => t.value !== 'Absent').map(t => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">HR Comment</label>
+              <textarea 
+                value={hrComment}
+                onChange={(e) => setHrComment(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none min-h-[100px]"
+                placeholder="Reason for revoking absent status..."
+                required
+              />
+            </div>
+          </div>
+
+          <div className="flex gap-3">
+            <button 
+              type="button"
+              onClick={onClose}
+              className="flex-1 bg-gray-100 text-gray-700 py-4 px-6 rounded-2xl font-bold hover:bg-gray-200 transition-all"
+            >
+              Cancel
+            </button>
+            <button 
+              type="submit"
+              disabled={loading}
+              className="flex-1 bg-blue-600 text-white py-4 px-6 rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-xl shadow-blue-600/20"
+            >
+              {loading ? 'Updating...' : 'Update Status'}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );
@@ -817,10 +1548,11 @@ function ApplyLeaveModal({ profile, onClose }: { profile: UserProfile; onClose: 
   const [leaveType, setLeaveType] = useState<LeaveType>('CL');
   const [startDate, setStartDate] = useState(format(addDays(new Date(), 3), 'yyyy-MM-dd'));
   const [endDate, setEndDate] = useState(format(addDays(new Date(), 3), 'yyyy-MM-dd'));
+  const [isHalfDay, setIsHalfDay] = useState(false);
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const days = differenceInDays(new Date(endDate), new Date(startDate)) + 1;
+  const days = isHalfDay ? 0.5 : (differenceInDays(new Date(endDate), new Date(startDate)) + 1);
   const balance = profile.balances[leaveType as keyof LeaveBalances] || 0;
   
   const isAdvanceNotice = differenceInDays(new Date(startDate), startOfDay(new Date())) >= 3;
@@ -830,7 +1562,7 @@ function ApplyLeaveModal({ profile, onClose }: { profile: UserProfile; onClose: 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (days <= 0) return alert("End date must be after start date");
-    if (leaveType !== 'LWP' && days > balance) return alert("Insufficient balance");
+    if (leaveType !== 'WPL' && days > balance) return alert("Insufficient balance");
     if (leaveType === 'CL' && days > 3) return alert("Casual leave cannot exceed 3 days at a stretch");
 
     setSubmitting(true);
@@ -840,8 +1572,9 @@ function ApplyLeaveModal({ profile, onClose }: { profile: UserProfile; onClose: 
         employeeName: profile.displayName,
         leaveType,
         startDate,
-        endDate,
+        endDate: isHalfDay ? startDate : endDate,
         days,
+        isHalfDay,
         reason,
         status: 'pending',
         createdAt: Timestamp.now(),
@@ -873,7 +1606,7 @@ function ApplyLeaveModal({ profile, onClose }: { profile: UserProfile; onClose: 
                 onChange={(e) => setLeaveType(e.target.value as LeaveType)}
                 className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-orange-500 outline-none"
               >
-                {LEAVE_TYPES.map(t => (
+                {LEAVE_TYPES.filter(t => t.value !== 'Absent').map(t => (
                   <option key={t.value} value={t.value}>{t.label}</option>
                 ))}
               </select>
@@ -881,7 +1614,7 @@ function ApplyLeaveModal({ profile, onClose }: { profile: UserProfile; onClose: 
             <div className="space-y-2">
               <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Available Balance</label>
               <div className="bg-gray-100 rounded-xl px-4 py-3 font-bold text-gray-900">
-                {leaveType === 'LWP' ? 'N/A' : `${balance} Days`}
+                {leaveType === 'WPL' ? 'N/A' : `${balance} Days`}
               </div>
             </div>
           </div>
@@ -892,7 +1625,10 @@ function ApplyLeaveModal({ profile, onClose }: { profile: UserProfile; onClose: 
               <input 
                 type="date" 
                 value={startDate}
-                onChange={(e) => setStartDate(e.target.value)}
+                onChange={(e) => {
+                  setStartDate(e.target.value);
+                  if (isHalfDay) setEndDate(e.target.value);
+                }}
                 className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-orange-500 outline-none"
                 required
               />
@@ -901,12 +1637,29 @@ function ApplyLeaveModal({ profile, onClose }: { profile: UserProfile; onClose: 
               <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">End Date</label>
               <input 
                 type="date" 
-                value={endDate}
+                value={isHalfDay ? startDate : endDate}
                 onChange={(e) => setEndDate(e.target.value)}
-                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-orange-500 outline-none"
+                disabled={isHalfDay}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-orange-500 outline-none disabled:opacity-50"
                 required
               />
             </div>
+          </div>
+
+          <div className="flex items-center gap-3 bg-gray-50 p-4 rounded-2xl border border-gray-100">
+            <input 
+              type="checkbox" 
+              id="halfDay"
+              checked={isHalfDay}
+              onChange={(e) => {
+                setIsHalfDay(e.target.checked);
+                if (e.target.checked) setEndDate(startDate);
+              }}
+              className="w-5 h-5 rounded border-gray-300 text-orange-600 focus:ring-orange-500"
+            />
+            <label htmlFor="halfDay" className="text-sm font-bold text-gray-700 cursor-pointer">
+              Apply for Half Day
+            </label>
           </div>
 
           <div className="space-y-2">
@@ -1169,10 +1922,267 @@ function EncashLeaveModal({ profile, onClose }: { profile: UserProfile; onClose:
   );
 }
 
-function UserManagement() {
+function SalaryCalculator({ users, allRequests }: { users: UserProfile[]; allRequests: LeaveRequest[] }) {
+  const [selectedMonth, setSelectedMonth] = useState(format(new Date(), 'yyyy-MM'));
+  const [results, setResults] = useState<{ userId: string; name: string; salary: number; absentDays: number; payable: number }[]>([]);
+
+  const calculate = () => {
+    const [year, month] = selectedMonth.split('-').map(Number);
+    const daysInMonth = new Date(year, month, 0).getDate();
+    
+    const res = users.filter(u => u.role === 'employee').map(user => {
+      const monthlySalary = user.salary || 0;
+      const dailySalary = monthlySalary / daysInMonth;
+      
+      // Filter approved leaves for this month that are WPL or Absent
+      const monthRequests = allRequests.filter(req => {
+        if (req.uid !== user.uid || req.status !== 'approved') return false;
+        if (req.leaveType !== 'WPL' && req.leaveType !== 'Absent') return false;
+        
+        const start = new Date(req.startDate);
+        return start.getFullYear() === year && (start.getMonth() + 1) === month;
+      });
+      
+      const absentDays = monthRequests.reduce((sum, req) => sum + req.days, 0);
+      const payable = Math.max(0, monthlySalary - (absentDays * dailySalary));
+      
+      return {
+        userId: user.uid,
+        name: user.displayName,
+        salary: monthlySalary,
+        absentDays,
+        payable
+      };
+    });
+    
+    setResults(res);
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white rounded-[32px] p-8 border border-gray-200 shadow-sm">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+          <div>
+            <h3 className="text-2xl font-bold text-gray-900">Salary Calculation</h3>
+            <p className="text-gray-500 text-sm">Calculate monthly payable salary based on attendance</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <input 
+              type="month" 
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(e.target.value)}
+              className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+            />
+            <button 
+              onClick={calculate}
+              className="bg-gray-900 text-white px-6 py-3 rounded-xl font-bold hover:bg-black transition-all shadow-lg shadow-gray-900/20 flex items-center gap-2"
+            >
+              <RefreshCw className="w-4 h-4" />
+              Calculate
+            </button>
+          </div>
+        </div>
+
+        {results.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="border-b border-gray-100">
+                  <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Employee</th>
+                  <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Base Salary</th>
+                  <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest text-center">Absent/WPL Days</th>
+                  <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest text-right">Payable Salary</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {results.map(res => (
+                  <tr key={res.userId} className="hover:bg-gray-50/50 transition-colors">
+                    <td className="py-4 font-bold text-gray-900">{res.name}</td>
+                    <td className="py-4 font-medium text-gray-600">₹{res.salary.toLocaleString()}</td>
+                    <td className="py-4 text-center">
+                      <span className={cn("px-2 py-1 rounded-lg text-xs font-bold", 
+                        res.absentDays > 0 ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700"
+                      )}>
+                        {res.absentDays} Days
+                      </span>
+                    </td>
+                    <td className="py-4 text-right">
+                      <p className="text-lg font-bold text-gray-900">₹{Math.round(res.payable).toLocaleString()}</p>
+                      <p className="text-[10px] text-gray-400 font-bold uppercase tracking-tighter">Net Payable</p>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="text-center py-12 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
+            <p className="text-gray-400 font-medium">Select a month and click calculate to see results</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AddPastLeaveModal({ users, onClose }: { users: UserProfile[]; onClose: () => void }) {
+  const [selectedUid, setSelectedUid] = useState('');
+  const [leaveType, setLeaveType] = useState<LeaveType>('CL');
+  const [startDate, setStartDate] = useState(format(new Date(), 'yyyy-MM-dd'));
+  const [endDate, setEndDate] = useState(format(new Date(), 'yyyy-MM-dd'));
+  const [reason, setReason] = useState('Previous record entry');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedUid) return alert("Please select an employee");
+    setLoading(true);
+    try {
+      const user = users.find(u => u.uid === selectedUid);
+      if (!user) throw new Error("User not found");
+
+      const days = differenceInDays(new Date(endDate), new Date(startDate)) + 1;
+
+      await addDoc(collection(db, 'leaveRequests'), {
+        uid: selectedUid,
+        employeeName: user.displayName,
+        leaveType,
+        startDate,
+        endDate,
+        days,
+        reason,
+        status: 'approved', // Past records are usually already approved
+        hrComment: 'Entered as past record by HR',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+
+      // Deduct from balance if not WPL/Absent
+      if (leaveType !== 'WPL' && leaveType !== 'Absent') {
+        const currentBalance = user.balances[leaveType as keyof LeaveBalances] || 0;
+        await updateDoc(doc(db, 'users', selectedUid), {
+          [`balances.${leaveType}`]: Math.max(0, currentBalance - days)
+        });
+      }
+
+      onClose();
+    } catch (err) {
+      console.error("Error adding past leave:", err);
+      alert("Failed to add record.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6 z-50">
+      <div className="bg-white rounded-[32px] w-full max-w-md overflow-hidden shadow-2xl animate-in fade-in zoom-in duration-200">
+        <div className="bg-purple-600 p-8 text-white">
+          <h3 className="text-2xl font-bold">Add Past Leave Record</h3>
+          <p className="text-purple-100 text-sm mt-1">Enter leave data from before system implementation</p>
+        </div>
+        
+        <form onSubmit={handleSubmit} className="p-8 space-y-6">
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Select Employee</label>
+              <select 
+                value={selectedUid}
+                onChange={(e) => setSelectedUid(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-purple-500 outline-none"
+                required
+              >
+                <option value="">Choose employee...</option>
+                {users.filter(u => u.role === 'employee').map(u => (
+                  <option key={u.uid} value={u.uid}>{u.displayName}</option>
+                ))}
+              </select>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Leave Type</label>
+                <select 
+                  value={leaveType}
+                  onChange={(e) => setLeaveType(e.target.value as LeaveType)}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-purple-500 outline-none"
+                >
+                  {LEAVE_TYPES.map(t => (
+                    <option key={t.value} value={t.value}>{t.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Reason</label>
+                <input 
+                  type="text" 
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-purple-500 outline-none"
+                  required
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Start Date</label>
+                <input 
+                  type="date" 
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-purple-500 outline-none"
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">End Date</label>
+                <input 
+                  type="date" 
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-purple-500 outline-none"
+                  required
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="flex gap-3">
+            <button 
+              type="button"
+              onClick={onClose}
+              className="flex-1 bg-gray-100 text-gray-700 py-4 px-6 rounded-2xl font-bold hover:bg-gray-200 transition-all"
+            >
+              Cancel
+            </button>
+            <button 
+              type="submit"
+              disabled={loading}
+              className="flex-1 bg-purple-600 text-white py-4 px-6 rounded-2xl font-bold hover:bg-purple-700 transition-all shadow-xl shadow-purple-600/20"
+            >
+              {loading ? 'Adding...' : 'Add Record'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function UserManagement({ 
+  setSelectedUserForCompOff, 
+  setShowAddCompOffModal,
+  setSelectedUserForAbsent,
+  setShowMarkAbsentModal
+}: { 
+  setSelectedUserForCompOff: (u: UserProfile) => void; 
+  setShowAddCompOffModal: (b: boolean) => void;
+  setSelectedUserForAbsent: (u: UserProfile) => void;
+  setShowMarkAbsentModal: (b: boolean) => void;
+}) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
+  const [salary, setSalary] = useState('');
   const [loading, setLoading] = useState(false);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
@@ -1197,19 +2207,25 @@ function UserManagement() {
 
       // 2. Create Firestore Profile
       const userRef = doc(db, 'users', newUser.uid);
+      const now = new Date();
+      const currentMonthKey = `${now.getMonth()}-${now.getFullYear()}`;
+      
       await setDoc(userRef, {
         uid: newUser.uid,
         email: email,
         displayName: displayName,
         photoURL: `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=random`,
         role: 'employee',
-        balances: INITIAL_BALANCES,
+        salary: Number(salary) || 0,
+        balances: { ...INITIAL_BALANCES },
+        lastAccrualUpdate: currentMonthKey
       });
 
       setMessage({ type: 'success', text: `User ${displayName} created successfully!` });
       setEmail('');
       setPassword('');
       setDisplayName('');
+      setSalary('');
     } catch (err: any) {
       console.error("Error creating user:", err);
       setMessage({ type: 'error', text: err.message });
@@ -1238,6 +2254,7 @@ function UserManagement() {
       await updateDoc(doc(db, 'users', editingUser.uid), {
         displayName: editingUser.displayName,
         designation: editingUser.designation,
+        salary: Number(editingUser.salary) || 0,
         role: editingUser.role
       });
       setEditingUser(null);
@@ -1299,6 +2316,17 @@ function UserManagement() {
                 minLength={6}
               />
             </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Monthly Salary</label>
+              <input 
+                type="number" 
+                value={salary}
+                onChange={(e) => setSalary(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+                placeholder="50000"
+                required
+              />
+            </div>
           </div>
 
           {message && (
@@ -1334,6 +2362,7 @@ function UserManagement() {
               <tr className="border-b border-gray-100">
                 <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Employee</th>
                 <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Designation</th>
+                <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Salary</th>
                 <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Role</th>
                 <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest text-right">Actions</th>
               </tr>
@@ -1353,6 +2382,7 @@ function UserManagement() {
                     </div>
                   </td>
                   <td className="py-4 font-medium text-gray-600">{u.designation || 'Not set'}</td>
+                  <td className="py-4 font-bold text-gray-900">₹{u.salary?.toLocaleString() || '0'}</td>
                   <td className="py-4">
                     <span className={cn("px-2 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider", 
                       u.role === 'hr' ? "bg-purple-100 text-purple-700" : "bg-blue-100 text-blue-700"
@@ -1362,6 +2392,26 @@ function UserManagement() {
                   </td>
                   <td className="py-4 text-right">
                     <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button 
+                        onClick={() => {
+                          setSelectedUserForCompOff(u);
+                          setShowAddCompOffModal(true);
+                        }}
+                        className="p-2 text-gray-400 hover:text-orange-600 hover:bg-orange-50 rounded-lg transition-all"
+                        title="Add CompOff"
+                      >
+                        <Clock className="w-4 h-4" />
+                      </button>
+                      <button 
+                        onClick={() => {
+                          setSelectedUserForAbsent(u);
+                          setShowMarkAbsentModal(true);
+                        }}
+                        className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                        title="Mark Absent"
+                      >
+                        <XCircle className="w-4 h-4" />
+                      </button>
                       <button 
                         onClick={() => setEditingUser(u)}
                         className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
@@ -1411,6 +2461,17 @@ function UserManagement() {
                   onChange={(e) => setEditingUser({...editingUser, designation: e.target.value})}
                   className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
                   placeholder="e.g. Senior Developer"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Monthly Salary</label>
+                <input 
+                  type="number" 
+                  value={editingUser.salary || ''}
+                  onChange={(e) => setEditingUser({...editingUser, salary: Number(e.target.value)})}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+                  placeholder="50000"
+                  required
                 />
               </div>
               <div className="space-y-2">
