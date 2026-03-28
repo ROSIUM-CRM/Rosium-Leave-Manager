@@ -31,7 +31,11 @@ import {
   ChevronRight
 } from 'lucide-react';
 import { format, differenceInDays, addDays, isBefore, startOfDay } from 'date-fns';
-import { auth, db, signInWithGoogle, logout } from './firebase';
+import { auth, db, loginWithEmail, registerUser, logout } from './firebase';
+import { 
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword
+} from 'firebase/auth';
 import { cn } from './lib/utils';
 
 // --- Types ---
@@ -133,7 +137,7 @@ export default function App() {
   const [showApplyModal, setShowApplyModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showEncashModal, setShowEncashModal] = useState(false);
-  const [viewMode, setViewMode] = useState<'dashboard' | 'calendar'>('dashboard');
+  const [viewMode, setViewMode] = useState<'dashboard' | 'calendar' | 'users'>('dashboard');
 
   // Auth & Profile Setup
   useEffect(() => {
@@ -161,8 +165,8 @@ export default function App() {
           const newProfile: UserProfile = {
             uid: firebaseUser.uid,
             email: firebaseUser.email || '',
-            displayName: firebaseUser.displayName || 'Employee',
-            photoURL: firebaseUser.photoURL || '',
+            displayName: firebaseUser.displayName || (isHR ? 'HR Admin' : 'New Employee'),
+            photoURL: firebaseUser.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(firebaseUser.email || 'User')}&background=random`,
             role: isHR ? 'hr' : 'employee',
             balances: INITIAL_BALANCES,
           };
@@ -299,9 +303,13 @@ export default function App() {
               allRequests={allRequests} 
               encashmentRequests={encashmentRequests}
             />
-          ) : (
+          ) : viewMode === 'calendar' ? (
             <div className="lg:col-span-12">
               <HRCalendar allRequests={allRequests} />
+            </div>
+          ) : (
+            <div className="lg:col-span-12">
+              <UserManagement />
             </div>
           )
         )}
@@ -337,25 +345,104 @@ export default function App() {
 // --- Sub-Components ---
 
 function LoginScreen() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [isSettingUpHR, setIsSettingUpHR] = useState(false);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      await loginWithEmail(email, password);
+    } catch (err: any) {
+      console.error("Login error:", err);
+      if (err.code === 'auth/user-not-found' && email === 'hr.rosium@gmail.com') {
+        setIsSettingUpHR(true);
+        setError("HR account not found. Would you like to set it up now?");
+      } else {
+        setError(err.message || "Invalid email or password");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSetupHR = async () => {
+    setLoading(true);
+    try {
+      await createUserWithEmailAndPassword(auth, email, password);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#F5F2ED] flex items-center justify-center p-6">
-      <div className="max-w-md w-full bg-white rounded-[32px] shadow-2xl shadow-orange-900/10 p-10 text-center border border-gray-100">
+      <div className="max-w-md w-full bg-white rounded-[32px] shadow-2xl shadow-orange-900/10 p-10 border border-gray-100">
         <div className="bg-orange-600 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-8 shadow-lg shadow-orange-600/20">
           <Calendar className="text-white w-8 h-8" />
         </div>
-        <h2 className="text-4xl font-serif font-bold text-gray-900 mb-2">Welcome Back</h2>
-        <p className="text-gray-500 mb-10 text-lg">Rosium Developers Leave Management System</p>
+        <h2 className="text-3xl font-serif font-bold text-gray-900 mb-2 text-center">Rosium Leave Manager</h2>
+        <p className="text-gray-500 mb-8 text-center">Corporate Portal Login</p>
         
-        <button 
-          onClick={signInWithGoogle}
-          className="w-full flex items-center justify-center gap-3 bg-gray-900 text-white py-4 px-6 rounded-2xl font-bold hover:bg-black transition-all transform hover:-translate-y-1 active:scale-95 shadow-xl shadow-gray-900/20"
-        >
-          <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-6 h-6" alt="Google" />
-          Sign in with Google
-        </button>
+        <form onSubmit={handleLogin} className="space-y-4">
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest ml-1">Email Address</label>
+            <input 
+              type="email" 
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-orange-500 outline-none"
+              placeholder="name@rosium.com"
+              required
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest ml-1">Password</label>
+            <input 
+              type="password" 
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-orange-500 outline-none"
+              placeholder="••••••••"
+              required
+            />
+          </div>
+
+          {error && (
+            <div className="p-3 bg-red-50 text-red-600 rounded-xl text-xs font-bold flex items-center gap-2">
+              <AlertCircle className="w-4 h-4" />
+              {error}
+            </div>
+          )}
+
+          {isSettingUpHR ? (
+            <button 
+              type="button"
+              onClick={handleSetupHR}
+              disabled={loading}
+              className="w-full bg-orange-600 text-white py-4 px-6 rounded-2xl font-bold hover:bg-orange-700 transition-all shadow-xl shadow-orange-600/20"
+            >
+              {loading ? 'Setting up...' : 'Initialize HR Account'}
+            </button>
+          ) : (
+            <button 
+              type="submit"
+              disabled={loading}
+              className="w-full bg-gray-900 text-white py-4 px-6 rounded-2xl font-bold hover:bg-black transition-all shadow-xl shadow-gray-900/20"
+            >
+              {loading ? 'Signing in...' : 'Sign In'}
+            </button>
+          )}
+        </form>
         
-        <div className="mt-10 pt-8 border-t border-gray-100">
-          <p className="text-xs text-gray-400 uppercase tracking-widest font-bold">Authorized Access Only</p>
+        <div className="mt-10 pt-8 border-t border-gray-100 text-center">
+          <p className="text-[10px] text-gray-400 uppercase tracking-widest font-bold">Authorized Access Only</p>
         </div>
       </div>
     </div>
@@ -1045,6 +1132,132 @@ function EncashLeaveModal({ profile, onClose }: { profile: UserProfile; onClose:
             </button>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function UserManagement() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setMessage(null);
+    try {
+      // 1. Create Auth User using secondary app (to stay logged in as HR)
+      const userCredential = await registerUser(email, password);
+      const newUser = userCredential.user;
+
+      // 2. Create Firestore Profile
+      const userRef = doc(db, 'users', newUser.uid);
+      await setDoc(userRef, {
+        uid: newUser.uid,
+        email: email,
+        displayName: displayName,
+        photoURL: `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=random`,
+        role: 'employee',
+        balances: INITIAL_BALANCES,
+      });
+
+      setMessage({ type: 'success', text: `User ${displayName} created successfully!` });
+      setEmail('');
+      setPassword('');
+      setDisplayName('');
+    } catch (err: any) {
+      console.error("Error creating user:", err);
+      setMessage({ type: 'error', text: err.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-[32px] p-8 border border-gray-200 shadow-sm max-w-2xl mx-auto">
+      <div className="flex items-center gap-3 mb-8">
+        <div className="bg-blue-100 p-3 rounded-2xl text-blue-600">
+          <ShieldCheck className="w-6 h-6" />
+        </div>
+        <div>
+          <h3 className="text-2xl font-bold text-gray-900">User Management</h3>
+          <p className="text-gray-500 text-sm">Create new employee accounts</p>
+        </div>
+      </div>
+
+      <form onSubmit={handleCreateUser} className="space-y-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Full Name</label>
+            <input 
+              type="text" 
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+              placeholder="John Doe"
+              required
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Email Address</label>
+            <input 
+              type="email" 
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+              placeholder="john@rosium.com"
+              required
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Initial Password</label>
+            <input 
+              type="password" 
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+              placeholder="••••••••"
+              required
+              minLength={6}
+            />
+          </div>
+        </div>
+
+        {message && (
+          <div className={cn("p-4 rounded-xl text-sm font-bold flex items-center gap-3", 
+            message.type === 'success' ? "bg-green-50 text-green-600" : "bg-red-50 text-red-600"
+          )}>
+            {message.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+            {message.text}
+          </div>
+        )}
+
+        <button 
+          type="submit"
+          disabled={loading}
+          className="w-full bg-blue-600 text-white py-4 px-6 rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-xl shadow-blue-600/20 flex items-center justify-center gap-2"
+        >
+          {loading ? 'Creating User...' : (
+            <>
+              <Plus className="w-5 h-5" />
+              Create Employee Account
+            </>
+          )}
+        </button>
+      </form>
+
+      <div className="mt-12 p-6 bg-gray-50 rounded-2xl border border-gray-100">
+        <h4 className="font-bold text-gray-900 mb-2 flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 text-orange-500" />
+          Important Note
+        </h4>
+        <p className="text-sm text-gray-500 leading-relaxed">
+          Newly created employees will be prompted to complete their profile (Designation, DOB, DOJ) upon their first login. 
+          Please ensure the email address is correct as it will be used for login.
+        </p>
       </div>
     </div>
   );
