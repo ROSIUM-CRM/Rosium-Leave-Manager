@@ -359,7 +359,9 @@ function LoginScreen() {
       await loginWithEmail(email, password);
     } catch (err: any) {
       console.error("Login error:", err);
-      if (err.code === 'auth/user-not-found' && email === 'info.rosium@gmail.com') {
+      if (err.code === 'auth/operation-not-allowed') {
+        setError("Email/Password login is not enabled in your Firebase Console. Please enable it under Authentication > Sign-in method.");
+      } else if (err.code === 'auth/user-not-found' && email === 'info.rosium@gmail.com') {
         setIsSettingUpHR(true);
         setError("HR account not found. Would you like to set it up now?");
       } else {
