@@ -13,6 +13,7 @@ import {
   where, 
   onSnapshot, 
   updateDoc,
+  deleteDoc,
   Timestamp,
   orderBy,
   getDocFromServer
@@ -28,7 +29,9 @@ import {
   ShieldCheck,
   FileText,
   AlertCircle,
-  ChevronRight
+  ChevronRight,
+  Edit,
+  Trash2
 } from 'lucide-react';
 import { format, differenceInDays, addDays, isBefore, startOfDay } from 'date-fns';
 import { auth, db, loginWithEmail, registerUser, logout } from './firebase';
@@ -1158,7 +1161,17 @@ function UserManagement() {
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [loading, setLoading] = useState(false);
+  const [users, setUsers] = useState<UserProfile[]>([]);
+  const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+
+  useEffect(() => {
+    const q = query(collection(db, 'users'), orderBy('displayName', 'asc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      setUsers(snapshot.docs.map(doc => doc.data() as UserProfile));
+    });
+    return () => unsubscribe();
+  }, []);
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1192,89 +1205,233 @@ function UserManagement() {
     }
   };
 
+  const handleDeleteUser = async (uid: string, name: string) => {
+    if (!window.confirm(`Are you sure you want to delete the profile for ${name}? This will remove their leave data from the system.`)) return;
+    
+    try {
+      await deleteDoc(doc(db, 'users', uid));
+      // Note: Full Auth deletion requires Admin SDK, but removing Firestore profile effectively disables app access
+    } catch (e) {
+      console.error("Error deleting user:", e);
+      alert("Failed to delete user profile.");
+    }
+  };
+
+  const handleUpdateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUser) return;
+    setLoading(true);
+    try {
+      await updateDoc(doc(db, 'users', editingUser.uid), {
+        displayName: editingUser.displayName,
+        designation: editingUser.designation,
+        role: editingUser.role
+      });
+      setEditingUser(null);
+    } catch (e) {
+      console.error("Error updating user:", e);
+      alert("Failed to update user.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <div className="bg-white rounded-[32px] p-8 border border-gray-200 shadow-sm max-w-2xl mx-auto">
-      <div className="flex items-center gap-3 mb-8">
-        <div className="bg-blue-100 p-3 rounded-2xl text-blue-600">
-          <ShieldCheck className="w-6 h-6" />
-        </div>
-        <div>
-          <h3 className="text-2xl font-bold text-gray-900">User Management</h3>
-          <p className="text-gray-500 text-sm">Create new employee accounts</p>
-        </div>
-      </div>
-
-      <form onSubmit={handleCreateUser} className="space-y-6">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="space-y-2">
-            <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Full Name</label>
-            <input 
-              type="text" 
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
-              placeholder="John Doe"
-              required
-            />
+    <div className="space-y-8 max-w-5xl mx-auto">
+      {/* Create User Form */}
+      <div className="bg-white rounded-[32px] p-8 border border-gray-200 shadow-sm">
+        <div className="flex items-center gap-3 mb-8">
+          <div className="bg-blue-100 p-3 rounded-2xl text-blue-600">
+            <ShieldCheck className="w-6 h-6" />
           </div>
-          <div className="space-y-2">
-            <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Email Address</label>
-            <input 
-              type="email" 
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
-              placeholder="john@rosium.com"
-              required
-            />
-          </div>
-          <div className="space-y-2">
-            <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Initial Password</label>
-            <input 
-              type="password" 
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
-              placeholder="••••••••"
-              required
-              minLength={6}
-            />
+          <div>
+            <h3 className="text-2xl font-bold text-gray-900">Create New User</h3>
+            <p className="text-gray-500 text-sm">Add a new employee to the system</p>
           </div>
         </div>
 
-        {message && (
-          <div className={cn("p-4 rounded-xl text-sm font-bold flex items-center gap-3", 
-            message.type === 'success' ? "bg-green-50 text-green-600" : "bg-red-50 text-red-600"
-          )}>
-            {message.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
-            {message.text}
+        <form onSubmit={handleCreateUser} className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Full Name</label>
+              <input 
+                type="text" 
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+                placeholder="John Doe"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Email Address</label>
+              <input 
+                type="email" 
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+                placeholder="john@rosium.com"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Initial Password</label>
+              <input 
+                type="password" 
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+                placeholder="••••••••"
+                required
+                minLength={6}
+              />
+            </div>
           </div>
-        )}
 
-        <button 
-          type="submit"
-          disabled={loading}
-          className="w-full bg-blue-600 text-white py-4 px-6 rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-xl shadow-blue-600/20 flex items-center justify-center gap-2"
-        >
-          {loading ? 'Creating User...' : (
-            <>
-              <Plus className="w-5 h-5" />
-              Create Employee Account
-            </>
+          {message && (
+            <div className={cn("p-4 rounded-xl text-sm font-bold flex items-center gap-3", 
+              message.type === 'success' ? "bg-green-50 text-green-600" : "bg-red-50 text-red-600"
+            )}>
+              {message.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+              {message.text}
+            </div>
           )}
-        </button>
-      </form>
 
-      <div className="mt-12 p-6 bg-gray-50 rounded-2xl border border-gray-100">
-        <h4 className="font-bold text-gray-900 mb-2 flex items-center gap-2">
-          <AlertCircle className="w-4 h-4 text-orange-500" />
-          Important Note
-        </h4>
-        <p className="text-sm text-gray-500 leading-relaxed">
-          Newly created employees will be prompted to complete their profile (Designation, DOB, DOJ) upon their first login. 
-          Please ensure the email address is correct as it will be used for login.
-        </p>
+          <button 
+            type="submit"
+            disabled={loading}
+            className="w-full bg-blue-600 text-white py-4 px-6 rounded-2xl font-bold hover:bg-blue-700 transition-all shadow-xl shadow-blue-600/20 flex items-center justify-center gap-2"
+          >
+            {loading ? 'Creating User...' : (
+              <>
+                <Plus className="w-5 h-5" />
+                Create Employee Account
+              </>
+            )}
+          </button>
+        </form>
       </div>
+
+      {/* User List */}
+      <div className="bg-white rounded-[32px] p-8 border border-gray-200 shadow-sm">
+        <h3 className="text-2xl font-bold text-gray-900 mb-6">Employee Directory</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead>
+              <tr className="border-b border-gray-100">
+                <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Employee</th>
+                <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Designation</th>
+                <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Role</th>
+                <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {users.map(u => (
+                <tr key={u.uid} className="group hover:bg-gray-50/50 transition-colors">
+                  <td className="py-4">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-gray-100 flex items-center justify-center font-bold text-gray-500">
+                        {u.displayName.charAt(0)}
+                      </div>
+                      <div>
+                        <p className="font-bold text-gray-900">{u.displayName}</p>
+                        <p className="text-xs text-gray-500">{u.email}</p>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="py-4 font-medium text-gray-600">{u.designation || 'Not set'}</td>
+                  <td className="py-4">
+                    <span className={cn("px-2 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider", 
+                      u.role === 'hr' ? "bg-purple-100 text-purple-700" : "bg-blue-100 text-blue-700"
+                    )}>
+                      {u.role}
+                    </span>
+                  </td>
+                  <td className="py-4 text-right">
+                    <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button 
+                        onClick={() => setEditingUser(u)}
+                        className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                      >
+                        <Edit className="w-4 h-4" />
+                      </button>
+                      <button 
+                        onClick={() => handleDeleteUser(u.uid, u.displayName)}
+                        className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Edit User Modal */}
+      {editingUser && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6 z-50">
+          <div className="bg-white rounded-[32px] w-full max-w-md overflow-hidden shadow-2xl animate-in fade-in zoom-in duration-200">
+            <div className="bg-gray-900 p-8 text-white">
+              <h3 className="text-2xl font-bold">Edit User Profile</h3>
+              <p className="text-gray-400 text-sm mt-1">{editingUser.email}</p>
+            </div>
+            
+            <form onSubmit={handleUpdateUser} className="p-8 space-y-6">
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Full Name</label>
+                <input 
+                  type="text" 
+                  value={editingUser.displayName}
+                  onChange={(e) => setEditingUser({...editingUser, displayName: e.target.value})}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Designation</label>
+                <input 
+                  type="text" 
+                  value={editingUser.designation || ''}
+                  onChange={(e) => setEditingUser({...editingUser, designation: e.target.value})}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+                  placeholder="e.g. Senior Developer"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Role</label>
+                <select 
+                  value={editingUser.role}
+                  onChange={(e) => setEditingUser({...editingUser, role: e.target.value as any})}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+                >
+                  <option value="employee">Employee</option>
+                  <option value="hr">HR</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-4 pt-4">
+                <button 
+                  type="button"
+                  onClick={() => setEditingUser(null)}
+                  className="flex-1 py-4 px-6 rounded-2xl font-bold text-gray-500 hover:bg-gray-100 transition-all"
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="submit"
+                  disabled={loading}
+                  className="flex-1 bg-blue-600 text-white py-4 px-6 rounded-2xl font-bold hover:bg-blue-700 transition-all disabled:opacity-50 shadow-xl shadow-blue-600/20"
+                >
+                  {loading ? 'Saving...' : 'Update Profile'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
