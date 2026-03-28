@@ -161,7 +161,7 @@ export default function App() {
           }
         } else {
           // Create new profile
-          const isHR = firebaseUser.email === 'hr.rosium@gmail.com';
+          const isHR = firebaseUser.email === 'info.rosium@gmail.com';
           const newProfile: UserProfile = {
             uid: firebaseUser.uid,
             email: firebaseUser.email || '',
@@ -359,7 +359,7 @@ function LoginScreen() {
       await loginWithEmail(email, password);
     } catch (err: any) {
       console.error("Login error:", err);
-      if (err.code === 'auth/user-not-found' && email === 'hr.rosium@gmail.com') {
+      if (err.code === 'auth/user-not-found' && email === 'info.rosium@gmail.com') {
         setIsSettingUpHR(true);
         setError("HR account not found. Would you like to set it up now?");
       } else {
