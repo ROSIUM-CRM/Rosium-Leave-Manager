@@ -359,11 +359,14 @@ function LoginScreen() {
       await loginWithEmail(email, password);
     } catch (err: any) {
       console.error("Login error:", err);
+      const isHREmail = email === 'info.rosium@gmail.com';
+      
       if (err.code === 'auth/operation-not-allowed') {
         setError("Email/Password login is not enabled in your Firebase Console. Please enable it under Authentication > Sign-in method.");
-      } else if (err.code === 'auth/user-not-found' && email === 'info.rosium@gmail.com') {
+      } else if (isHREmail && (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential' || err.code === 'auth/invalid-login-credentials')) {
+        // Some Firebase versions return invalid-credential for non-existent users
         setIsSettingUpHR(true);
-        setError("HR account not found. Would you like to set it up now?");
+        setError("HR account not found or credentials invalid. If this is your first time, click 'Initialize HR Account' below.");
       } else {
         setError(err.message || "Invalid email or password");
       }
@@ -394,7 +397,18 @@ function LoginScreen() {
         
         <form onSubmit={handleLogin} className="space-y-4">
           <div className="space-y-1">
-            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest ml-1">Email Address</label>
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest ml-1">Email Address</label>
+              {email === 'info.rosium@gmail.com' && !isSettingUpHR && (
+                <button 
+                  type="button"
+                  onClick={() => setIsSettingUpHR(true)}
+                  className="text-[10px] font-bold text-orange-600 uppercase tracking-widest hover:underline"
+                >
+                  Setup HR?
+                </button>
+              )}
+            </div>
             <input 
               type="email" 
               value={email}
