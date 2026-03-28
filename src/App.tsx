@@ -157,6 +157,11 @@ export default function App() {
 
         if (userSnap.exists()) {
           const data = userSnap.data() as UserProfile;
+          // Auto-upgrade to HR if email matches
+          if (data.email === 'info.rosium@gmail.com' && data.role !== 'hr') {
+            await updateDoc(userRef, { role: 'hr' });
+            data.role = 'hr';
+          }
           setProfile(data);
           // Check if profile is incomplete
           if (!data.designation || !data.dob || !data.doj) {
@@ -271,6 +276,14 @@ export default function App() {
                 )}
               >
                 Calendar
+              </button>
+              <button 
+                onClick={() => setViewMode('users')}
+                className={cn("px-4 py-1.5 rounded-lg text-sm font-bold transition-all", 
+                  viewMode === 'users' ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
+                )}
+              >
+                Manage Users
               </button>
             </div>
           )}
