@@ -1,0 +1,74 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Stores user information, role, and leave balances.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "role": { "type": "string", "enum": ["employee", "hr"], "description": "User's role in the system" },
+        "designation": { "type": "string" },
+        "dob": { "type": "string", "format": "date" },
+        "doj": { "type": "string", "format": "date" },
+        "balances": {
+          "type": "object",
+          "properties": {
+            "CL": { "type": "number", "description": "Casual Leave balance" },
+            "PL": { "type": "number", "description": "Privilege/Earned Leave balance" },
+            "SL": { "type": "number", "description": "Sick Leave balance" },
+            "ML": { "type": "number", "description": "Maternity Leave balance" },
+            "PaL": { "type": "number", "description": "Paternity Leave balance" },
+            "CompOff": { "type": "number", "description": "Compensatory Off balance" }
+          }
+        },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "LeaveRequest": {
+      "title": "Leave Request",
+      "description": "Stores individual leave applications.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "UID of the employee who requested leave" },
+        "employeeName": { "type": "string" },
+        "leaveType": { "type": "string", "enum": ["CL", "PL", "SL", "ML", "PaL", "CompOff", "LWP"] },
+        "startDate": { "type": "string", "format": "date" },
+        "endDate": { "type": "string", "format": "date" },
+        "days": { "type": "number" },
+        "reason": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "hrComment": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "leaveType", "startDate", "endDate", "days", "status"]
+    },
+    "EncashmentRequest": {
+      "title": "PL/EL Encashment Request",
+      "description": "Request to cash out earned leave balances.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "employeeName": { "type": "string" },
+        "amount": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "amount", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "User",
+      "description": "User profiles and leave balances."
+    },
+    "/leaveRequests/{requestId}": {
+      "schema": "LeaveRequest",
+      "description": "Leave applications."
+    }
+  }
+}
