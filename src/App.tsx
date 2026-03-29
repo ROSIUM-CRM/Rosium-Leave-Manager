@@ -65,10 +65,23 @@ interface UserProfile {
   role: 'employee' | 'hr';
   designation?: string;
   salary?: number;
+  weeklyOff?: string;
   dob?: string;
   doj?: string;
   balances: LeaveBalances;
   lastAccrualUpdate?: string;
+}
+
+interface CompOffRequest {
+  id: string;
+  uid: string;
+  employeeName: string;
+  workedDate: string;
+  reason: string;
+  status: 'pending' | 'approved' | 'rejected';
+  hrComment?: string;
+  createdAt: any;
+  updatedAt: any;
 }
 
 interface EncashmentRequest {
@@ -112,6 +125,8 @@ const LEAVE_TYPES: { label: string; value: LeaveType; color: string }[] = [
   { label: 'Without Pay Leave (WPL)', value: 'WPL', color: 'bg-gray-100 text-gray-700' },
   { label: 'Absent (Indiscipline)', value: 'Absent', color: 'bg-red-600 text-white' },
 ];
+
+const WEEK_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 const INITIAL_BALANCES: LeaveBalances = {
   CL: 7,
@@ -172,9 +187,11 @@ export default function App() {
   const [requests, setRequests] = useState<LeaveRequest[]>([]);
   const [allRequests, setAllRequests] = useState<LeaveRequest[]>([]);
   const [encashmentRequests, setEncashmentRequests] = useState<EncashmentRequest[]>([]);
+  const [compOffRequests, setCompOffRequests] = useState<CompOffRequest[]>([]);
   const [showApplyModal, setShowApplyModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showEncashModal, setShowEncashModal] = useState(false);
+  const [showCompOffRequestModal, setShowCompOffRequestModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showAddCompOffModal, setShowAddCompOffModal] = useState(false);
   const [showMarkAbsentModal, setShowMarkAbsentModal] = useState(false);
@@ -290,9 +307,20 @@ export default function App() {
       setEncashmentRequests(data);
     });
 
+    // Fetch CompOff requests
+    const compOffQuery = profile.role === 'hr' 
+      ? query(collection(db, 'compOffRequests'), orderBy('createdAt', 'desc'))
+      : query(collection(db, 'compOffRequests'), where('uid', '==', profile.uid), orderBy('createdAt', 'desc'));
+
+    const compOffUnsubscribe = onSnapshot(compOffQuery, (snapshot) => {
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as CompOffRequest));
+      setCompOffRequests(data);
+    });
+
     return () => {
       unsubscribe();
       encUnsubscribe();
+      compOffUnsubscribe();
     };
   }, [profile]);
 
@@ -385,6 +413,7 @@ export default function App() {
               setSelectedRequestForChange(req);
               setShowChangeRequestModal(true);
             }}
+            onCompOffRequest={() => setShowCompOffRequestModal(true)}
           />
         ) : (
           viewMode === 'dashboard' ? (
@@ -392,6 +421,7 @@ export default function App() {
               profile={profile} 
               allRequests={allRequests} 
               encashmentRequests={encashmentRequests}
+              compOffRequests={compOffRequests}
               onChangeAbsent={(req) => {
                 setSelectedAbsentRequest(req);
                 setShowChangeAbsentModal(true);
@@ -483,6 +513,13 @@ export default function App() {
             setShowChangeAbsentModal(false);
             setSelectedAbsentRequest(null);
           }}
+        />
+      )}
+
+      {showCompOffRequestModal && profile && (
+        <RequestCompOffModal 
+          profile={profile} 
+          onClose={() => setShowCompOffRequestModal(false)} 
         />
       )}
     </div>
@@ -909,7 +946,21 @@ function LoginScreen() {
   );
 }
 
-function EmployeeDashboard({ profile, requests, onApply, onEncash, onApplyChangeRequest }: { profile: UserProfile; requests: LeaveRequest[]; onApply: () => void; onEncash: () => void; onApplyChangeRequest: (req: LeaveRequest) => void }) {
+function EmployeeDashboard({ 
+  profile, 
+  requests, 
+  onApply, 
+  onEncash, 
+  onApplyChangeRequest,
+  onCompOffRequest
+}: { 
+  profile: UserProfile; 
+  requests: LeaveRequest[]; 
+  onApply: () => void; 
+  onEncash: () => void; 
+  onApplyChangeRequest: (req: LeaveRequest) => void;
+  onCompOffRequest: () => void;
+}) {
   const isJanuary = new Date().getMonth() === 0;
   
   return (
@@ -934,6 +985,13 @@ function EmployeeDashboard({ profile, requests, onApply, onEncash, onApplyChange
           <div className="flex items-center justify-between mb-6">
             <h3 className="font-bold text-gray-900 text-lg">Leave Balances</h3>
             <div className="flex gap-2">
+              <button 
+                onClick={onCompOffRequest}
+                className="bg-orange-50 text-orange-600 px-3 py-2 rounded-xl text-xs font-bold hover:bg-orange-100 transition-all border border-orange-100"
+                title="Request CompOff for working on weekly off"
+              >
+                Request CompOff
+              </button>
               {isJanuary && profile.balances.PL > 0 && (
                 <button 
                   onClick={onEncash}
@@ -1061,7 +1119,19 @@ function EmployeeDashboard({ profile, requests, onApply, onEncash, onApplyChange
   );
 }
 
-function HRDashboard({ profile, allRequests, encashmentRequests, onChangeAbsent }: { profile: UserProfile; allRequests: LeaveRequest[]; encashmentRequests: EncashmentRequest[]; onChangeAbsent: (req: LeaveRequest) => void }) {
+function HRDashboard({ 
+  profile, 
+  allRequests, 
+  encashmentRequests, 
+  compOffRequests,
+  onChangeAbsent 
+}: { 
+  profile: UserProfile; 
+  allRequests: LeaveRequest[]; 
+  encashmentRequests: EncashmentRequest[]; 
+  compOffRequests: CompOffRequest[];
+  onChangeAbsent: (req: LeaveRequest) => void 
+}) {
   const [activeTab, setActiveTab] = useState<'leaves' | 'salary'>('leaves');
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [showPastLeaveModal, setShowPastLeaveModal] = useState(false);
@@ -1077,6 +1147,7 @@ function HRDashboard({ profile, allRequests, encashmentRequests, onChangeAbsent 
   const pending = allRequests.filter(r => r.status === 'pending');
   const history = allRequests.filter(r => r.status !== 'pending');
   const pendingEncash = encashmentRequests.filter(r => r.status === 'pending');
+  const pendingCompOff = compOffRequests.filter(r => r.status === 'pending');
   const changeRequests = allRequests.filter(r => r.changeRequest && r.changeRequest.status === 'pending');
 
   const handleAction = async (requestId: string, status: 'approved' | 'rejected') => {
@@ -1129,6 +1200,44 @@ function HRDashboard({ profile, allRequests, encashmentRequests, onChangeAbsent 
     }
   };
 
+  const handleCompOffAction = async (request: CompOffRequest, status: 'approved' | 'rejected') => {
+    const comment = prompt(`Add a comment for this ${status} (optional):`);
+    try {
+      // 1. Update request status
+      await updateDoc(doc(db, 'compOffRequests', request.id), {
+        status,
+        hrComment: comment || '',
+        updatedAt: serverTimestamp()
+      });
+
+      // 2. If approved, update user balance
+      if (status === 'approved') {
+        const userRef = doc(db, 'users', request.uid);
+        const userSnap = await getDoc(userRef);
+        if (userSnap.exists()) {
+          const userData = userSnap.data() as UserProfile;
+          const currentCompOff = userData.balances.CompOff || 0;
+          await updateDoc(userRef, {
+            'balances.CompOff': currentCompOff + 1
+          });
+
+          // Also add to compOffRecords for history
+          await addDoc(collection(db, 'compOffRecords'), {
+            uid: request.uid,
+            employeeName: request.employeeName,
+            workedDate: request.workedDate,
+            reason: request.reason,
+            addedBy: profile.uid,
+            createdAt: new Date().toISOString()
+          });
+        }
+      }
+    } catch (err) {
+      console.error("Error processing CompOff request:", err);
+      alert("Failed to process request.");
+    }
+  };
+
   return (
     <div className="lg:col-span-12 space-y-8">
       {/* Tabs */}
@@ -1164,6 +1273,10 @@ function HRDashboard({ profile, allRequests, encashmentRequests, onChangeAbsent 
             <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-sm">
               <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Pending Encash</p>
               <p className="text-4xl font-bold text-blue-600">{pendingEncash.length}</p>
+            </div>
+            <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-sm">
+              <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Pending CompOff</p>
+              <p className="text-4xl font-bold text-purple-600">{pendingCompOff.length}</p>
             </div>
             <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-sm">
               <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Total Processed</p>
@@ -1214,7 +1327,7 @@ function HRDashboard({ profile, allRequests, encashmentRequests, onChangeAbsent 
 
       {/* Encashment Requests */}
       {pendingEncash.length > 0 && (
-        <div className="bg-blue-50 rounded-3xl p-8 border border-blue-100 shadow-sm">
+        <div className="bg-blue-50 rounded-3xl p-8 border border-blue-100 shadow-sm mb-8">
           <h3 className="text-2xl font-bold text-blue-900 mb-8 flex items-center gap-3">
             PL/EL Encashment Requests
             <span className="bg-blue-200 text-blue-700 text-xs px-2 py-1 rounded-full">{pendingEncash.length}</span>
@@ -1229,6 +1342,43 @@ function HRDashboard({ profile, allRequests, encashmentRequests, onChangeAbsent 
                 <div className="flex gap-2">
                   <button onClick={() => handleEncashAction(req.id, 'approved')} className="bg-green-600 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-green-700 transition-all">Approve</button>
                   <button onClick={() => handleEncashAction(req.id, 'rejected')} className="bg-red-600 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-red-700 transition-all">Reject</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* CompOff Requests */}
+      {pendingCompOff.length > 0 && (
+        <div className="bg-purple-50 rounded-3xl p-8 border border-purple-100 shadow-sm mb-8">
+          <h3 className="text-2xl font-bold text-purple-900 mb-8 flex items-center gap-3">
+            CompOff Credit Requests
+            <span className="bg-purple-200 text-purple-700 text-xs px-2 py-1 rounded-full">{pendingCompOff.length}</span>
+          </h3>
+          <div className="space-y-4">
+            {pendingCompOff.map(req => (
+              <div key={req.id} className="bg-white p-6 rounded-2xl flex items-center justify-between shadow-sm border border-purple-100">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <p className="font-bold text-gray-900">{req.employeeName}</p>
+                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">worked on {format(new Date(req.workedDate), 'MMM dd, yyyy')}</span>
+                  </div>
+                  <p className="text-sm text-gray-600 italic">"{req.reason}"</p>
+                </div>
+                <div className="flex gap-2 ml-4">
+                  <button 
+                    onClick={() => handleCompOffAction(req, 'approved')} 
+                    className="bg-green-600 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-green-700 transition-all flex items-center gap-2"
+                  >
+                    <CheckCircle className="w-4 h-4" /> Approve
+                  </button>
+                  <button 
+                    onClick={() => handleCompOffAction(req, 'rejected')} 
+                    className="bg-red-600 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-red-700 transition-all flex items-center gap-2"
+                  >
+                    <XCircle className="w-4 h-4" /> Reject
+                  </button>
                 </div>
               </div>
             ))}
@@ -2168,6 +2318,87 @@ function AddPastLeaveModal({ users, onClose }: { users: UserProfile[]; onClose: 
   );
 }
 
+function RequestCompOffModal({ profile, onClose }: { profile: UserProfile; onClose: () => void }) {
+  const [workedDate, setWorkedDate] = useState(format(new Date(), 'yyyy-MM-dd'));
+  const [reason, setReason] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      await addDoc(collection(db, 'compOffRequests'), {
+        uid: profile.uid,
+        employeeName: profile.displayName,
+        workedDate,
+        reason,
+        status: 'pending',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      onClose();
+    } catch (err) {
+      console.error("Error requesting CompOff:", err);
+      alert("Failed to send request.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6 z-50">
+      <div className="bg-white rounded-[32px] w-full max-w-md overflow-hidden shadow-2xl animate-in fade-in zoom-in duration-200">
+        <div className="bg-orange-600 p-8 text-white">
+          <h3 className="text-2xl font-bold">Request CompOff</h3>
+          <p className="text-orange-100 text-sm mt-1">Request credit for working on your Weekly Off day</p>
+        </div>
+        
+        <form onSubmit={handleSubmit} className="p-8 space-y-6">
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Date Worked</label>
+              <input 
+                type="date" 
+                value={workedDate}
+                onChange={(e) => setWorkedDate(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-orange-500 outline-none"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Reason / Details</label>
+              <textarea 
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-orange-500 outline-none min-h-[100px]"
+                placeholder="e.g. Worked on Sunday for project deadline..."
+                required
+              />
+            </div>
+          </div>
+
+          <div className="flex gap-3">
+            <button 
+              type="button"
+              onClick={onClose}
+              className="flex-1 bg-gray-100 text-gray-700 py-4 px-6 rounded-2xl font-bold hover:bg-gray-200 transition-all"
+            >
+              Cancel
+            </button>
+            <button 
+              type="submit"
+              disabled={loading}
+              className="flex-1 bg-orange-600 text-white py-4 px-6 rounded-2xl font-bold hover:bg-orange-700 transition-all shadow-xl shadow-orange-600/20"
+            >
+              {loading ? 'Sending...' : 'Send Request'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function UserManagement({ 
   setSelectedUserForCompOff, 
   setShowAddCompOffModal,
@@ -2183,6 +2414,7 @@ function UserManagement({
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [salary, setSalary] = useState('');
+  const [weeklyOff, setWeeklyOff] = useState('Sunday');
   const [loading, setLoading] = useState(false);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
@@ -2217,6 +2449,7 @@ function UserManagement({
         photoURL: `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=random`,
         role: 'employee',
         salary: Number(salary) || 0,
+        weeklyOff: weeklyOff,
         balances: { ...INITIAL_BALANCES },
         lastAccrualUpdate: currentMonthKey
       });
@@ -2226,6 +2459,7 @@ function UserManagement({
       setPassword('');
       setDisplayName('');
       setSalary('');
+      setWeeklyOff('Sunday');
     } catch (err: any) {
       console.error("Error creating user:", err);
       setMessage({ type: 'error', text: err.message });
@@ -2255,6 +2489,7 @@ function UserManagement({
         displayName: editingUser.displayName,
         designation: editingUser.designation,
         salary: Number(editingUser.salary) || 0,
+        weeklyOff: editingUser.weeklyOff || 'Sunday',
         role: editingUser.role
       });
       setEditingUser(null);
@@ -2327,6 +2562,19 @@ function UserManagement({
                 required
               />
             </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Weekly Off Day</label>
+              <select 
+                value={weeklyOff}
+                onChange={(e) => setWeeklyOff(e.target.value)}
+                className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+                required
+              >
+                {WEEK_DAYS.map(day => (
+                  <option key={day} value={day}>{day}</option>
+                ))}
+              </select>
+            </div>
           </div>
 
           {message && (
@@ -2363,6 +2611,7 @@ function UserManagement({
                 <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Employee</th>
                 <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Designation</th>
                 <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Salary</th>
+                <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Weekly Off</th>
                 <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Role</th>
                 <th className="pb-4 text-xs font-bold text-gray-400 uppercase tracking-widest text-right">Actions</th>
               </tr>
@@ -2383,6 +2632,7 @@ function UserManagement({
                   </td>
                   <td className="py-4 font-medium text-gray-600">{u.designation || 'Not set'}</td>
                   <td className="py-4 font-bold text-gray-900">₹{u.salary?.toLocaleString() || '0'}</td>
+                  <td className="py-4 font-medium text-gray-600">{u.weeklyOff || 'Sunday'}</td>
                   <td className="py-4">
                     <span className={cn("px-2 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider", 
                       u.role === 'hr' ? "bg-purple-100 text-purple-700" : "bg-blue-100 text-blue-700"
@@ -2473,6 +2723,19 @@ function UserManagement({
                   placeholder="50000"
                   required
                 />
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Weekly Off Day</label>
+                <select 
+                  value={editingUser.weeklyOff || 'Sunday'}
+                  onChange={(e) => setEditingUser({...editingUser, weeklyOff: e.target.value})}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 font-bold text-gray-900 focus:ring-2 focus:ring-blue-500 outline-none"
+                  required
+                >
+                  {WEEK_DAYS.map(day => (
+                    <option key={day} value={day}>{day}</option>
+                  ))}
+                </select>
               </div>
               <div className="space-y-2">
                 <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Role</label>
